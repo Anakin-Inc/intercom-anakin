@@ -1,8 +1,10 @@
 # intercom-anakin
 
 An Intercom Inbox app, built on Intercom's Canvas Kit, that adds
-[Anakin](https://anakin.io) — web scraping, AI-powered search, and
-multi-stage agentic research — to the conversation sidebar.
+[Anakin](https://anakin.io) — web scraping and crawling, site mapping,
+AI-powered search, multi-stage agentic research, live data lookups on
+hundreds of sites via Wire, and website-change monitoring — to the
+conversation sidebar.
 
 ## Not an iframe app — Canvas Kit is webhook-driven
 
@@ -23,9 +25,11 @@ static asset bundle.
 
 ## What's covered
 
-The same three-endpoint baseline every other single-purpose Anakin
-integration built this session covers, exposed as a conversation-sidebar
-flow a support agent drives one action at a time:
+This app started (previous session) with the three-endpoint baseline shared
+across every single-purpose Anakin integration in this batch. This change
+extends it to 9 of Anakin's 21 REST API capabilities — everything a support
+agent plausibly needs while looking things up mid-conversation — exposed as
+a conversation-sidebar flow driven one action at a time:
 
 - **Scrape a URL** — submits `POST /v1/url-scraper`, then polls
   `GET /v1/url-scraper/:jobId`. Since Canvas Kit request/response is
@@ -40,10 +44,116 @@ flow a support agent drives one action at a time:
   `GET /v1/agentic-search/:jobId` the same way as Scrape. Shows the
   AI-generated summary plus, if a JSON Schema was supplied, the structured
   data. Costs 10 credits.
+- **Crawl a Site** *(new)* — submits `POST /v1/crawl`, polls
+  `GET /v1/crawl/:jobId`. Bulk-fetches markdown across several pages of a
+  site in one go (e.g. a whole docs section), with optional
+  include/exclude path patterns. Shows each page's URL and fetch status;
+  taps through to open a page, with a hint to Scrape a specific URL for its
+  full text.
+- **Map a Site** *(new)* — submits `POST /v1/map`, polls `GET /v1/map/:jobId`.
+  Lists a domain's discoverable URLs (internal + optionally external) —
+  useful for finding the right page before scraping or crawling it.
+- **Find & Run a Site Action (Wire)** *(new)* — `GET /v1/wire/resolve`
+  (natural-language discovery), `GET /v1/wire/catalog` and
+  `GET /v1/wire/catalog/:slug` (browsing), `POST /v1/wire/task` + poll
+  `GET /v1/wire/jobs/:jobId` (execution). Looks up live data — an order, a
+  listing, a profile, dashboard data — on any of Wire's hundreds of
+  supported sites without writing a scraper. **Read actions only** — see
+  "Scope: Wire read actions only" below for why, and for a real bug this
+  scoping decision surfaced during live testing.
+- **Website Monitors** *(new)* — `GET /v1/monitors` and
+  `GET /v1/monitors/:id/changes`. Lets a support agent check whether a
+  page they're discussing (a status page, a pricing page, a policy page) is
+  being watched and what changed recently. Read-only — this app never
+  creates, pauses, or deletes a monitor.
 
 Results are shown as `text` components in the sidebar for the teammate to
 select and copy into their reply — see "Inserting into the reply composer"
 below for why this app doesn't attempt an automatic insert.
+
+## Coverage decisions: what's in scope for a support-agent sidebar, and why
+
+Anakin's REST API has 21 capabilities total; this app now covers 9. The
+remaining 12 were deliberately left out, each for one of two reasons —
+"the task brief says skip it" or "it doesn't fit a support agent working one
+open conversation":
+
+**Skipped per the task brief** (automation/write surface, not a sidebar
+lookup tool):
+- `wire_write_action` — state-changing Wire actions (submit a form, add to
+  cart). This app's entire Wire integration is scoped to read actions only;
+  see below.
+- `wire_login` / `wire_identities` — credential management for Wire's
+  auth-required actions. No sign-in UI exists in this app; an auth-required
+  action surfaces a "Connect account" link (the `connect_url` Wire returns
+  on `AUTH_REQUIRED`) instead of attempting to authenticate inline.
+- `wire_build` — requests a brand-new scraper for an unlisted site. A
+  billed, asynchronous content-generation action, not a lookup.
+- `monitor_create` / `monitor_control` (pause/resume/run_now/delete) —
+  creating or mutating a recurring, billed background job. A support
+  agent reads monitor state (`monitor_list`/`monitor_changes`, both
+  included); creating/managing monitors is an admin/ops task for the
+  Anakin dashboard, not a per-conversation lookup.
+- `session_delete` — irreversibly deletes saved login state used across
+  many monitors/crawls, not scoped to one conversation.
+- `browser_task` — open-ended natural-language browser automation (clicks,
+  form fills, multi-step flows). The task brief's own framing — "a support
+  agent's sidebar is mostly about lookups, not automation" — applies most
+  directly here; `browser_task` is Anakin's most automation-shaped
+  capability of the 21.
+
+**Skipped as out of scope for *this* app's job** (a single support agent
+working *this* conversation), even though nothing in the task brief
+required skipping them:
+- `session_list` — lists saved browser-session IDs used as a `sessionId`
+  input to scrape/crawl/monitor_create for login-protected pages. This app
+  exposes none of those `sessionId` fields (Scrape's form, for instance,
+  never asks for one), so listing session IDs here would hand the teammate
+  identifiers with no action to take on them. It is infrastructure
+  plumbing for pages behind a login, not conversation-relevant lookup data.
+- `ai_visibility_search` / `ai_visibility_sources` — asks multiple AI
+  answer engines the same question and compares results, for brand/AI-SEO
+  visibility tracking. This is a genuinely useful Anakin capability, but
+  it answers "how do AI engines describe our brand in general," not
+  anything about *this* customer's *this* conversation — it's a
+  marketing/SEO workflow, not a support-conversation lookup, and adding it
+  here would dilute the app's single clear job. Flagged, not silently
+  dropped: this is the one candidate capability excluded on judgment
+  rather than an explicit brief instruction, and it's a reasonable
+  candidate for a *separate*, marketing-team-facing Intercom app if one is
+  ever built.
+- `monitor_get` (fetch one monitor's config by id, distinct from
+  `monitor_list`) — `monitor_list`'s response already carries what this
+  app's `monitor_pick_N` flow needs (url, active state, interval);
+  `monitor_get` returns the same monitor's full config object, which adds
+  nothing actionable in a sidebar that never edits a monitor.
+
+## Scope: Wire read actions only
+
+Wire actions are split by `type` into `read` (data extraction — search
+listings, fetch a product's price, read a profile) and `write`
+(state-changing — submit a form, add to a cart). `anakin-mcp/src/tools/
+wire.ts` splits these into two separate MCP tools specifically so a write
+action always needs its own explicit safety annotation and confirmation
+step; this app follows the same principle by never rendering a write action
+as tappable, anywhere.
+
+**A real, live-testing-confirmed complication**: `GET /wire/resolve`'s
+results do **not** reliably include a `type` field — a live query
+(`q=track my package`) returned candidates shaped like
+`{action_id, catalog, credits, auth_required, auth_satisfied, params}`,
+with no read/write marker at all. `GET /wire/catalog/:slug`'s `actions[]`,
+by contrast, *does* reliably report `type` (confirmed live for the
+`1800flowers` catalog: 9 actions, 3 read / 6 write, each correctly typed).
+Trusting an absent field on the resolve response as "must be write" (or
+"must be read") would be guessing at unconfirmed, safety-relevant API
+behavior — exactly what this submission's other files repeatedly say not to
+do. So **Find & Run a Site Action never renders a resolve result as directly
+runnable**: it groups resolve matches by their `catalog` slug, then always
+fetches that site's full catalog entry (which does reliably report `type`)
+and filters to `type === "read"` before anything is shown as tappable. One
+extra network hop, but it means the "read actions only" guarantee is backed
+by a field the API actually returns reliably, not one it doesn't.
 
 ## Files
 
@@ -204,6 +314,55 @@ from memory:
   confirmed shape, flagged as the one inferred-not-fetched component in
   SUBMIT.md.
 
+## Anakin API ground truth: two source files, and where live testing corrected both
+
+The original three endpoints (url-scraper, search, agentic-search) were read
+from `anakin-py/src/anakin/client.py` / `models.py`. The six endpoints added
+in this change (map, crawl, wire_discover, wire_catalog, wire_read_action,
+monitor_list, monitor_changes) were read from a different first-party
+source instead — `anakin-mcp/src/client.ts` and `anakin-mcp/src/tools/
+{wire,monitor}.ts` in this same repo — since that's the ground truth this
+task was scoped against. Both are real clients of the same
+`api.anakin.io/v1`, so this is still "read from source, not guessed," just a
+different source file than the original three endpoints cite.
+
+That source only gets you so far, though: several of its own type
+declarations are honestly loose (`WireResolveResponse.results:
+Array<Record<string, unknown>>`, `wireCatalog(): Promise<unknown>`) because
+the MCP client passes those payloads straight through to a model without
+needing to parse specific fields itself. This app *does* need to parse
+specific fields (to render list titles, build a params form, filter to read
+actions), so those endpoints were also live-curled directly against
+`api.anakin.io/v1` with a throwaway key during this change, and two real
+discrepancies from what the source's comments/tool descriptions implied were
+found and fixed as a result:
+
+1. **`GET /wire/catalog` wraps its array as `{ catalog: [...] }`** (singular
+   key) — the initial implementation guessed `catalogs`/`results`/`items`
+   and silently rendered "No catalogs returned" against the real API. Fixed
+   by adding `catalog` to the extraction key list (kept the guessed keys too,
+   as fallbacks). `GET /wire/catalog/:slug`'s `{ actions: [...] }` key,
+   by contrast, was guessed correctly the first time.
+2. **`GET /wire/resolve` results don't reliably carry Wire's `type`
+   (read/write) field** — see "Scope: Wire read actions only" above for the
+   full explanation and the design change this drove (grouping resolve
+   matches by catalog and always confirming type against `/wire/catalog/
+   :slug` before rendering anything as runnable).
+
+A third, Canvas-Kit-adjacent bug was also found this way: `anakinRequest()`'s
+error-body parsing (originally written only against the flat
+`{error: "msg"}` shape used by url-scraper/search/agentic-search) produced
+`"[object Object]"` in the rendered error canvas against Wire's nested
+`{error: {code, message}}` envelope — confirmed live via `wire_run_submit`
+against a fake API key. Fixed in `server.js`'s `anakinRequest()`, and
+along the way, a second flat-shape issue in the *same* function was also
+caught live: a bad key against `/v1/crawl` real-returns
+`{"error":"unauthorized","message":"Invalid or inactive API key"}` — the
+original message-selection logic would have shown the terser `"unauthorized"`
+instead of the more useful `"Invalid or inactive API key"`. Both are
+covered by regression tests in `test/smoke.test.js` (search for
+"regression" in that file).
+
 ## Precedent
 
 Zendesk's Yext "AI Search" precedent (see `../zendesk-anakin/README.md`)
@@ -226,8 +385,8 @@ pattern as the documented, intended way to build Inbox apps.
    conversation details" and paste in the two webhook URLs (see
    `intercom-app-config.json`).
 4. Open a real conversation in the Inbox, pin the app to the sidebar, and
-   exercise all three actions (Scrape, AI Search, Agentic Search) against
-   live data.
+   exercise all seven actions (Scrape, AI Search, Agentic Search, Crawl,
+   Map, Find & Run a Site Action, Website Monitors) against live data.
 5. For a public App Store listing: complete the Developer Hub's submission
    review flow (icon, description, screenshots) — a manual review process,
    not something scriptable from this repo.

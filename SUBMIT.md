@@ -14,16 +14,29 @@ the registration and configuration surface.
 server.js                  Express server implementing the real Canvas Kit
                             /initialize and /submit webhook contract,
                             X-Body-Signature verification, and the
-                            server-side Anakin API client (url-scraper,
-                            search, agentic-search — ground truth read from
-                            anakin-py/src/anakin/client.py and models.py).
+                            server-side Anakin API client — now 9 of
+                            Anakin's 21 REST capabilities (url-scraper,
+                            search, agentic-search, map, crawl,
+                            wire_discover/catalog/read_action,
+                            monitor_list/changes). Ground truth for the
+                            original three: anakin-py/src/anakin/client.py
+                            and models.py. Ground truth for the six added
+                            in this change: anakin-mcp/src/client.ts and
+                            anakin-mcp/src/tools/{wire,monitor}.ts, plus
+                            live curl testing against api.anakin.io/v1 —
+                            see README.md's "Anakin API ground truth"
+                            section for two real field-shape discrepancies
+                            that testing caught and fixed.
 intercom-app-config.json   Reference values for the Developer Hub dashboard
                             fields — not a file Intercom reads.
 package.json                express only, no build step.
 .env.example                ANAKIN_API_KEY / ANAKIN_BASE_URL /
                             INTERCOM_CLIENT_SECRET / PORT.
-test/smoke.test.js          9 node:test cases against this server's own
-                            responses, no network/account required.
+test/smoke.test.js          30 node:test cases against this server's own
+                            responses, no network/account required (two
+                            regression tests stub global.fetch to prove a
+                            specific bug fix; every other test is fully
+                            offline).
 ```
 
 Every Canvas Kit structure claim in README.md was checked against a real
@@ -70,33 +83,67 @@ going to originate from a browser in this architecture.
 - **`npm install` actually run** — real `npm install` in this sandbox,
   `express@^5.2.1` resolved and installed (67 packages, 0 vulnerabilities),
   not assumed to work.
-- **`npm test` (node:test) actually run — 10/10 pass** — covers: initialize
-  returns a valid canvas with the three-action list; unknown `component_id`
-  falls back to home instead of 500ing; `pick_scrape` returns the scrape
-  form with the right input/button ids; empty-URL submit returns an error
-  canvas, not a crash; `scrape_poll` with no `stored_data.job_id` degrades
-  gracefully; invalid-JSON-schema agentic submit is rejected before any
-  Anakin call; missing `ANAKIN_API_KEY` is handled as a clean error canvas
-  with no duplicate component ids (see next bullet); `/healthz` reports key
-  configuration; signature verification both rejects a bad
-  `X-Body-Signature` and accepts a correctly HMAC'd one.
+- **`npm test` (node:test) actually run — 30/30 pass** (10 original + 20
+  added in this change) — covers, for every action (Scrape, AI Search,
+  Agentic Search, Crawl, Map, Wire, Monitors): initialize returns a valid
+  canvas with the full seven-action list; unknown `component_id` falls back
+  to home instead of 500ing; each `pick_*` form renders its expected
+  input/button ids; empty-required-field submits return an error canvas,
+  not a crash; every `*_poll` and dynamic-id handler (`wire_pick_N`,
+  `wire_catalog_pick_N`, `monitor_pick_N`) degrades to a recoverable error
+  canvas when its `stored_data` reference is missing; invalid-JSON-schema
+  and invalid-JSON-params submits are rejected before any Anakin call;
+  missing `ANAKIN_API_KEY` is handled as a clean, single-`go_home` error
+  canvas across every new network-calling route, not just the original
+  Scrape path; `/healthz` reports key configuration; signature verification
+  both rejects a bad `X-Body-Signature` and accepts a correctly HMAC'd one;
+  two dedicated regression tests (below) stub `global.fetch` to prove the
+  Wire error-envelope bug fix and the `AUTH_REQUIRED` → "Connect account"
+  button behavior against a *simulated* real HTTP response, not just
+  hand-traced code.
 - **The server was actually started and curled against real HTTP, not just
   exercised in-process via node:test** — `node server.js` on a real port,
   then `curl -X POST http://127.0.0.1:.../canvas/initialize` and
   `/canvas/submit` with realistic Intercom-shaped request bodies
   (`workspace_id`, `conversation.id`, `component_id`, `input_values`,
-  `current_canvas.stored_data`) for every screen: home, scrape form, search
-  form, agentic form, and the `go_home` reset — every response was valid
-  JSON with a well-formed `canvas.content.components` array.
-- **A real network round trip to `https://api.anakin.io/v1` happened and was
-  correctly handled** — `scrape_submit` and `scrape_poll` were curled with a
-  deliberately fake API key; both produced a real HTTP response from the
-  live Anakin API (`"Invalid or inactive API key"`), which this server
-  turned into a well-formed Canvas Kit error screen rather than crashing or
-  leaking a stack trace. This proves the server-side HTTP client, header
-  (`X-API-Key`), base URL, and error-path handling are wired correctly
-  end-to-end against the real API — it does not prove a successful job
-  completes, since no real Anakin API key was exercised (see "Not done").
+  `current_canvas.stored_data`) for every screen, original and new: home
+  (confirmed all 7 action ids present), scrape/search/agentic/crawl/map/wire
+  forms, the Wire discover→sites→catalog→run chain, and the `go_home`
+  reset — every response was valid JSON with a well-formed
+  `canvas.content.components` array.
+- **Real network round trips to `https://api.anakin.io/v1` happened for every
+  new endpoint, not just the original three** — with a real (fake-valued,
+  no real credits) API key set, curled live:
+  - `GET /wire/catalog` (no slug) — returned real data: 50+ real site
+    catalogs (1-800-Flowers, 101 Cookbooks, 123inkt, …) with real
+    `action_count`s. This is what caught the `{catalog: [...]}` vs.
+    guessed-`catalogs` key bug — see README.md.
+  - `GET /wire/catalog/1800flowers` (a real slug from the above) — returned
+    9 real actions, correctly split 3 read / 6 write by this app's `type`
+    filter, with real parameter schemas (e.g. `Product Questions` needing a
+    `product_id: string, required`).
+  - `GET /wire/resolve?q=track+my+package` and `q=check+order+status+on+
+    toasttab` — both returned real, non-empty candidate lists spanning
+    multiple real catalogs (`airnavradar`, `beatport`, `nytimes`, `toasttab`,
+    `nasstatus-faa-gov`, …), correctly grouped and rendered as a
+    site-disambiguation screen. This is what caught the missing `type`
+    field on resolve results — see README.md's "Scope: Wire read actions
+    only."
+  - `POST /wire/task` with a fake key against a real action id — returned
+    `{"error":{"code":"UNAUTHORIZED","message":"Invalid API key."}}`,
+    rendered by this app as `"Invalid API key."`, not `"[object Object]"` —
+    the direct proof the nested-error-envelope fix works against the real
+    API, not just a hand-written test fixture.
+  - `POST /crawl`, `POST /map`, `GET /monitors` with a fake key — each
+    returned `{"error":"unauthorized","message":"Invalid or inactive API
+    key"}`; this app now shows the more descriptive `"Invalid or inactive
+    API key"` (previously would have shown the terser `"unauthorized"`).
+  Together these prove the server-side HTTP client, headers, base URL, and
+  error-path handling are wired correctly end-to-end against the real API
+  for the new endpoints just as they already were for the original three —
+  it does not prove a successful *completed* job (crawl/map/wire results,
+  monitor changes) renders correctly, since no real credits were spent (see
+  "Not done").
 - **`X-Body-Signature` verification was curled against real HTTP with a real
   HMAC** — with `INTERCOM_CLIENT_SECRET=test-secret` set: no header → 401;
   wrong header (`deadbeef`) → 401; header computed with
@@ -104,24 +151,44 @@ going to originate from a browser in this architecture.
   This is the actual verification algorithm exercised against a real
   HMAC implementation (OpenSSL), not just this server's own code checking
   itself.
-- **A real bug was found and fixed by this curl testing, not just written
-  and assumed correct**: the top-level `/canvas/submit` catch-all error
-  handler originally passed `retryId: "go_home"` into `errorCanvas()`, which
-  already appends its own `go_home` button — producing two components with
-  the same `id` in one canvas (found via curling `scrape_submit` with a real
-  URL against the missing-API-key path). Fixed in `server.js`, and a
-  regression test (`test/smoke.test.js`, "no ANAKIN_API_KEY configured
-  returns a single-go_home error canvas") now guards it. `assertValidCanvas`
-  in the test helper was also strengthened to assert no duplicate component
-  ids in any canvas, catching this whole bug class going forward.
-- **Response shapes for `/url-scraper`, `/search`, `/agentic-search` (submit
-  body fields, job-id field names `jobId`/`job_id`/`id`, poll status values
-  `completed`/`failed`, `generatedJson.summary`/`structuredData`)** — read
-  directly from `anakin-py/src/anakin/client.py` (`scrape()`, `search()`,
-  `agentic_search()` methods and their `_require_job_id`/`_is_job_terminal`
-  helpers) and `anakin-py/src/anakin/models.py` (`Document`, `SearchResult`,
-  `AgenticSearchResult`, `AgenticSearchData`), not guessed or copied from
-  the Zendesk submission's version of the same claim without re-checking.
+- **Real bugs found and fixed by curl-testing, not just written and assumed
+  correct**:
+  1. (Original session) The top-level `/canvas/submit` catch-all error
+     handler passed `retryId: "go_home"` into `errorCanvas()`, which already
+     appends its own `go_home` button — two components with the same `id`
+     in one canvas. Fixed; regression test guards it.
+  2. (This change) `anakinRequest()`'s error-body parsing only handled the
+     flat `{error: "msg"}` shape; against Wire's real nested
+     `{error: {code, message}}` envelope it rendered `"[object Object]"`.
+     Fixed to branch on whether `body.error` is a string or object, mirroring
+     `anakin-mcp/src/client.ts`'s own `toError()`. Regression test:
+     `test/smoke.test.js`, "surfaces Wire's nested error envelope message
+     correctly."
+  3. (This change) Same function, flat-shape branch: a real
+     `{"error":"unauthorized","message":"..."}"` response was rendering the
+     terse `error` field instead of the more descriptive sibling `message`
+     field. Fixed to prefer `message` when present.
+  4. (This change) `GET /wire/catalog`'s real response key is `catalog`
+     (singular), not `catalogs` — the initial guess silently rendered
+     "No catalogs returned" against real data. Fixed by curling the live
+     endpoint and adding the correct key.
+  5. (This change) `GET /wire/resolve` results don't reliably include a
+     `type` (read/write) field, contradicting what would otherwise have been
+     assumed from `wire.ts`'s tool description. Rather than patch around
+     it, this drove a real design change — see README.md's "Scope: Wire
+     read actions only."
+  `assertValidCanvas` in the test helper (already strengthened during the
+  original session to reject duplicate component ids) continues to guard
+  every screen added in this change too.
+- **Response shapes for `/url-scraper`, `/search`, `/agentic-search`** — read
+  directly from `anakin-py/src/anakin/client.py` and `models.py`, as in the
+  original session.
+- **Response shapes for `/map`, `/crawl`, `/wire/*`, `/monitors/*`** — read
+  from `anakin-mcp/src/client.ts` and `anakin-mcp/src/tools/{wire,
+  monitor}.ts`, then corrected against live API responses where the source
+  file's own typing was too loose to fully pin down field names (`Record
+  <string, unknown>` / `unknown`) — see the "Real bugs found" list above and
+  README.md's "Anakin API ground truth" section.
 - **Canvas Kit component/request/response field names** — see README.md's
   "Canvas Kit structure confirmed from source" section for the specific
   live-fetched doc page backing each one (Text, Button, Input, Checkbox,
@@ -141,16 +208,41 @@ going to originate from a browser in this architecture.
   certificate is a prerequisite for step 3 in README.md's "Steps," since
   Developer Hub webhook URLs must be HTTPS.
 - **Never exercised a real Anakin API key end-to-end through a full
-  scrape/search/agentic-search job to completion** — no real
-  `ANAKIN_API_KEY` was available in this environment (same limitation noted
-  in `../zendesk-anakin/SUBMIT.md`'s "Not done"). What *was* verified: a
-  fake key correctly produces a real, well-handled `401` from the live API
-  (see "Verified, not assumed" above) — proving the request path is wired
-  right, not that a successful response is handled correctly. `server.js`'s
-  success-path rendering (`scrapeResultScreen`, `searchResultScreen`,
-  `agenticResultScreen`) was checked by hand-tracing against the exact
-  field names in `anakin-py`'s response models, not by observing a real
-  completed job.
+  scrape/search/agentic-search/crawl/map/wire/monitor job to completion** —
+  no real `ANAKIN_API_KEY` was available in this environment (same
+  limitation noted in `../zendesk-anakin/SUBMIT.md`'s "Not done"). What
+  *was* verified: a fake key correctly produces real, well-handled error
+  responses from every endpoint this app calls, including the newly added
+  ones (see "Verified, not assumed" above for the specific curled
+  responses) — proving every request path is wired right, not that a
+  successful response is handled correctly. `server.js`'s success-path
+  rendering (`scrapeResultScreen`, `searchResultScreen`,
+  `agenticResultScreen`, `crawlResultScreen`, `mapResultScreen`,
+  `wireActionResultScreen`, `monitorChangesScreen`) was checked by
+  hand-tracing against real field names — for map/crawl/wire, those field
+  names come from a mix of `anakin-mcp/src/client.ts`'s typed interfaces
+  (`MapResult`, `CrawlResult`) and, for Wire and monitors, real (but
+  unauthenticated, error-terminated) live responses rather than a completed
+  job's payload — not by observing an actual completed job's success shape.
+- **Monitor changes' exact field names (`detectedAt`/`createdAt`/
+  `timestamp`, `summary`/`description`/`diff`) were never confirmed against
+  a real monitor** — `GET /monitors` and `GET /monitors/:id/changes` both
+  return `401` with the fake test key used in this session (no monitor ever
+  existed to fetch changes for), so `monitorChangesScreen()`'s field
+  fallback chain is written defensively (the same style used throughout
+  this file for exactly this reason) but untested against a real payload.
+  If the account owner creates a monitor and it detects a change, worth a
+  quick sanity curl against the real response before relying on this
+  screen's exact wording.
+- **Wire's `wire_login`/`wire_identities` are not implemented, so any
+  `AUTH_REQUIRED` action always ends at the "Connect account" link** — this
+  is the intended, documented scope (see README.md's "Coverage decisions"),
+  not a gap, but it does mean a support agent can discover an
+  authentication-required action and see its connect link, but can never
+  complete a lookup through it without leaving this app to connect the
+  account first (a one-time setup, not a per-conversation step, so this was
+  judged acceptable rather than building credential management into a
+  support sidebar).
 - **`card_creation_options` / one-tap "insert into reply" was not
   implemented** — confirmed to be a real, documented mechanism (see
   README.md's "Inserting into the reply composer" section for the citation)

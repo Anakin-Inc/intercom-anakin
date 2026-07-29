@@ -3,7 +3,7 @@
 
   "app": {
     "name": "Anakin",
-    "description": "Scrape URLs, run AI search, and kick off multi-stage agentic research from the conversation sidebar.",
+    "description": "Scrape, crawl, or map URLs; run AI search or agentic research; look up live data on hundreds of sites with Wire; and check website monitors — all from the conversation sidebar.",
     "workspace": "<the Intercom workspace this app is created in — Developer Hub > Your apps > New app>"
   },
 
